@@ -40,6 +40,21 @@ def main() -> int:
             "SNOWFLAKE_SCHEMA": SCHEMA_GOLD,
             "CONTOSO_SILVER_DATABASE": DATABASE,
             "CONTOSO_SILVER_SCHEMA": "PUBLIC",
+            # LAKEHOUSE_ID IS A FABRIC NAME AND THIS IS NOT FABRIC, but core's
+            # gold sources.yml spells the silver database
+            # `env_var('CONTOSO_SILVER_DATABASE', env_var('LAKEHOUSE_ID'))`,
+            # and Jinja evaluates the DEFAULT EAGERLY -- so the fallback is
+            # read whether or not the first name is set, and a Fabric-only
+            # variable becomes mandatory on every engine.
+            #
+            # Without it dbt does not reach the engine at all: it fails while
+            # PARSING with `Env var required but not provided: 'LAKEHOUSE_ID'`,
+            # and gold.py recorded that as a `dialect_gap` -- a plausible wrong
+            # reason that stood in this plan for months while gold had in fact
+            # never run here. databricks-platform-jobs sets it for the same
+            # reason. The real fix belongs in core: stop nesting env_var as a
+            # default.
+            "LAKEHOUSE_ID": DATABASE,
             "DBT_PROFILES_DIR": str(work.resolve()),
             "DBT_SEND_ANONYMOUS_USAGE_STATS": "false",
             "SNOWFLAKE_HOST": hostname,
