@@ -1,0 +1,11 @@
+name: contoso_gold
+version: "1.0.0"
+config-version: 2
+profile: contoso_gold
+model-paths: ["models"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+
+models:
+  contoso_gold:
+    +materialized: table
