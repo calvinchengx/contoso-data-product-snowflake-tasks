@@ -21,6 +21,5 @@ from __future__ import annotations
 import os
 import pathlib
 
-STAGE = pathlib.Path(
-    os.environ.get("PRODUCT_STAGE") or pathlib.Path(__file__).resolve().parent.parent / "stages"
-)
+HERE = pathlib.Path(__file__).resolve().parent.parent
+STAGE = pathlib.Path(os.environ.get("PRODUCT_STAGE") or HERE / "stages")
