@@ -7,7 +7,7 @@ through `COPY INTO`. Both halves have to name the SAME directory, and until the
 split they agreed by accident, because the steps and the compose file lived in
 one repository and both spelled it `<repo>/stages`.
 
-They no longer do. So the platform passes CONTOSO_STAGE, and mounts exactly
+They no longer do. So the platform passes PRODUCT_STAGE, and mounts exactly
 that path into the warehouse. The fallback below is not a guess at what the
 platform meant: `<product>/stages` is where the platform points by default, so
 a lone clone and a platform-driven run resolve to the same place. If the
@@ -22,5 +22,5 @@ import os
 import pathlib
 
 STAGE = pathlib.Path(
-    os.environ.get("CONTOSO_STAGE") or pathlib.Path(__file__).resolve().parent.parent / "stages"
+    os.environ.get("PRODUCT_STAGE") or pathlib.Path(__file__).resolve().parent.parent / "stages"
 )

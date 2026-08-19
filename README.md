@@ -43,7 +43,7 @@ keeps it that way.
 Neither is reached for — a product does not read into a platform:
 
 - **`data/admin.pat`** — the workspace credential, copied in by `make token`.
-- **`CONTOSO_STAGE`** — where the internal stage lives on the host. Ingest
+- **`PRODUCT_STAGE`** — where the internal stage lives on the host. Ingest
   writes there and the warehouse, a container, reads it back through
   `COPY INTO`. Both halves must name the same directory; `steps/stage.py`
   resolves it once and every step imports it.

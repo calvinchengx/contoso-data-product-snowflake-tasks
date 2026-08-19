@@ -92,7 +92,7 @@ def test_the_stage_is_resolved_in_one_place():
     warehouse -- a container the PLATFORM runs -- reads them back through
     `COPY INTO`. While the steps and the compose file lived in one repository,
     both spelled it `<repo>/stages` and agreed by accident. They are now in two,
-    so the platform passes CONTOSO_STAGE and mounts exactly that path.
+    so the platform passes PRODUCT_STAGE and mounts exactly that path.
 
     A step that derives the path itself would work in a lone clone and write
     files the warehouse cannot see under a platform that mounts somewhere else
