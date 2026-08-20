@@ -33,3 +33,4 @@ catalog.json
 product_snapshot.json
 bronze_metrics.json
 silver_metrics.json
+silver/dbt_project.yml

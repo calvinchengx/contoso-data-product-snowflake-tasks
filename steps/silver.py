@@ -23,6 +23,7 @@ import subprocess
 from pathlib import Path
 
 from contoso_product import silver_dir
+from contracts import ContractError, check, read_run_results, summarise
 from provision import sql
 from target import DATABASE, SCHEMA_SILVER, T, WAREHOUSE
 
@@ -104,6 +105,35 @@ def main() -> int:
         ],
         env=env,
     )
+
+    # SILVER SHIPS ONE SINGULAR TEST and it is the one that matters most here:
+    # `silver_orders_never_holds_a_non_positive_quantity` checks that the
+    # quarantine split does not leak a row. It is also exactly the shape of test
+    # that G29 found rendered by no task in another cell -- a singular test
+    # belongs to no model, so anything that iterates models runs it never.
+    #
+    # This step ran no tests at all until now, so the check below is not a
+    # tightening: it is the first time silver's guarantees have been evaluated
+    # by the pipeline that publishes them.
+    test_rc = subprocess.call(
+        [
+            "dbt",
+            "test",
+            "--project-dir",
+            str(work),
+            "--profiles-dir",
+            str(work),
+            "--vars",
+            json.dumps(BRONZE_NAMES),
+        ],
+        env=env,
+    )
+    results = read_run_results(work)
+    tested = summarise(results)
+    check(results, {p.stem for p in (product / "tests").glob("*.sql")}, "silver")
+    if test_rc != 0:
+        raise ContractError(f"silver: dbt test exited {test_rc} -- {tested}")
+    print(f"silver contracts: {tested}")
 
     # COUNTED AFTERWARDS, from the engine rather than from dbt's exit code.
     # dbt reports that it ran the models; only the warehouse can say whether

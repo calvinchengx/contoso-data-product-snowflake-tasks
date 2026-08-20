@@ -10,6 +10,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 
 from contoso_product import gold_dir
+from contracts import ContractError, check, read_run_results, summarise
 from target import DATABASE, SCHEMA_GOLD, T, WAREHOUSE
 
 
@@ -70,11 +71,38 @@ def main() -> int:
     except subprocess.CalledProcessError as exc:
         dialect_gap = f"dbt-snowflake gold failed on this engine: {exc}"
 
+    # THE CONTRACTS, ACTUALLY EVALUATED. `dbt test` is a SEPARATE invocation
+    # from `dbt run` because their exit codes mean different things: models that
+    # would not build and guarantees that do not hold are different failures,
+    # and one command reports them as one. `call` rather than `check_call` for
+    # the same reason the family's other cells use it -- a failing test must
+    # exit non-zero while still having WRITTEN the artefact that says which
+    # test failed, and check_call would throw before that artefact is read.
+    contracts: list[str] = []
+    tested = None
+    if not dialect_gap:
+        test_rc = subprocess.call(
+            ["dbt", "test", "--project-dir", str(work), "--profiles-dir", str(work)],
+            env=env,
+        )
+        results = read_run_results(work)
+        tested = summarise(results)
+        # The glob is the EXPECTATION now, not the answer: these are the
+        # contracts core ships, and `check` refuses unless dbt evaluated and
+        # passed every one of them.
+        contracts = check(
+            results,
+            {p.stem for p in (product / "tests").glob("*.sql")},
+            "gold",
+        )
+        if test_rc != 0:
+            raise ContractError(f"gold: dbt test exited {test_rc} -- {tested}")
+
     snapshot = {
         "revenue_usd": "0",
         "cancelled_revenue_usd": "0",
         "sale_lines": "0",
-        "contracts": sorted(p.stem for p in (product / "tests").glob("*.sql")),
+        "contracts": contracts,
         "runtime": "snowflake",
         "catalog": DATABASE,
         "engine": "duckdb",
@@ -101,7 +129,10 @@ def main() -> int:
             snapshot["revenue_usd"] = str(rows[0][0])
             snapshot["cancelled_revenue_usd"] = str(rows[0][1])
             snapshot["sale_lines"] = str(rows[0][2])
+    if tested:
+        snapshot["data_tests"] = tested
     Path("product_snapshot.json").write_text(json.dumps(snapshot, indent=2) + "\n", encoding="utf-8")
+    print(f"gold contracts: {tested}")
     print(f"gold snapshot {snapshot}")
     return 0
 
