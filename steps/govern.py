@@ -42,7 +42,13 @@ def login() -> None:
 
 def put(path: str, body: dict) -> dict:
     r = S.put(f"{OM}/{path}", json=body, timeout=60)
-    r.raise_for_status()
+    # RAISE WITH THE CATALOG'S OWN WORDS. `raise_for_status()` reports
+    # "400 Client Error: Bad Request for url: .../domains" and throws the body
+    # away -- and the body IS the diagnosis: OpenMetadata answers
+    # `[query param domainType must not be null]`, which names the field.
+    # Reading the response would have ended a round of guessing immediately.
+    if r.status_code >= 400:
+        raise SystemExit(f"OpenMetadata refused PUT /{path}: {r.status_code} {r.text[:400]}")
     return r.json() if r.content else {}
 
 
@@ -63,6 +69,22 @@ def main() -> int:
                 "name": DOMAIN,
                 "displayName": "Contoso Commerce",
                 "description": "One product, three runtimes (Fabric, Databricks, Snowflake).",
+                # REQUIRED, AND ONLY ON A FRESH CATALOG. OpenMetadata answers
+                # `[query param domainType must not be null]` with a 400, but a
+                # PUT over a domain that already exists does not need it -- so
+                # this step passed for as long as the catalog outlived a run,
+                # and failed the first time the stack came down with its
+                # volumes. A field that is mandatory only on first use is one a
+                # re-run will never catch, which is why this survived until
+                # govern ran here for the first time.
+                #
+                # `Consumer-aligned` is what the Fabric and Databricks cells
+                # already publish. Matching matters more than the taxonomy
+                # does: this is a HUMAN catalog, and one product described
+                # three ways by three runtimes is the disagreement it exists to
+                # remove. Accepted values are Aggregate, Consumer-aligned and
+                # Source-aligned; anything else is a 400.
+                "domainType": "Consumer-aligned",
             },
         )
         put(
