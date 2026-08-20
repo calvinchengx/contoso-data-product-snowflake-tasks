@@ -1,0 +1,35 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# The credential the platform hands this product, and nothing else. The
+# emulator's own data directory -- warehouse.duckdb included -- stays in the
+# platform, where the container that writes it lives.
+data/
+
+# The internal stage. Ingest writes the vendors' bytes here and the warehouse
+# reads them back through COPY INTO; the platform mounts this directory in.
+stages/
+
+# dbt: the models come from contoso-data-product and are materialised into
+# these projects at run time. Only the profiles are ours.
+gold/models/
+gold/macros/
+gold/tests/
+gold/target/
+gold/logs/
+gold/dbt_packages/
+silver/models/
+silver/macros/
+silver/tests/
+silver/target/
+silver/logs/
+silver/dbt_packages/
+
+state.json
+catalog.json
+product_snapshot.json
+bronze_metrics.json
+silver_metrics.json

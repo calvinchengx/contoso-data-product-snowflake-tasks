@@ -1,0 +1,108 @@
+[project]
+name = "contoso-data-product-snowflake-tasks"
+version = "0.1.0"
+description = "The Contoso data product for Snowflake Tasks: ingest, the medallion runners, and the dbt profiles the platform needs."
+requires-python = ">=3.12"
+authors = [{name = "Calvin Cheng", email = "calvin@calvinx.com"}]
+
+# WHAT A SNOWFLAKE TEAM WOULD WRITE, and nothing else. The transforms are NOT
+# here: every silver model and every line of gold SQL comes from
+# `contoso-data-product`. This leaf binds them to Snowflake -- an internal stage
+# to land in, `COPY INTO` to load with, a dbt profile -- and that binding is the
+# only thing a second engine would have to write differently.
+dependencies = [
+    # THE PRODUCT, BY TAG. Not a path: a leaf that resolves core from a sibling
+    # checkout cannot be cloned on its own, which is DoD item 1 in the family
+    # plan and the defect that made snowflake-platform-tasks unreachable by two
+    # consecutive core releases.
+    "contoso-data-product",
+    # The emulator-or-real switch, published by snowflake-emulator's release.
+    "snowflake-target",
+    "requests>=2.32,<3",
+    # THE ERP VENDOR IS A CHANGE STREAM, so a Kafka client is the only way to
+    # consume it. Reading erp.customer directly would be a snapshot, and a
+    # snapshot cannot say that a customer was in Germany before they were in
+    # France -- which is the entire reason this vendor exists.
+    "confluent-kafka>=2.5,<3",
+    # Not to ingest with: the CDC step reconciles the stream's net effect
+    # against the ERP's own row count, because a connector that stopped early
+    # produces a stream that is stable, well-formed and short.
+    "psycopg[binary]>=3.2,<4",
+    # The reference vendor ships Parquet. This engine's COPY INTO accepts
+    # TYPE = PARQUET, reports ok and loads nothing (snowflake-emulator#20), so
+    # the parts are rewritten as CSV on the way into the stage -- lossless for
+    # a flat table, and reversible the day that copy path works.
+    "pyarrow>=18,<24",
+]
+
+[dependency-groups]
+engine = [
+    "snowflake-connector-python>=3.12,<4",
+]
+dbt = [
+    "dbt-snowflake>=1.8,<2",
+]
+dev = ["pytest>=9.0.3,<10", "ruff>=0.14,<0.15"]
+
+[tool.uv]
+# THIRTEEN ADVISORIES, AND NONE OF THEM HAS A RELEASE TO UPGRADE INTO.
+#
+# All three packages arrive through dbt-snowflake, which pins an older
+# snowflake-connector-python, which in turn caps cryptography and pyopenssl.
+# The lock therefore carried BOTH versions of each -- the patched one for this
+# repository's own dependency on the connector, and a vulnerable one for dbt's:
+#
+#     cryptography  45.0.7  and  50.0.0
+#     pyopenssl     25.3.0  and  26.4.0
+#     sqlparse      0.5.5            (dbt-core declares sqlparse<0.6.0)
+#
+# A constraint cannot fix that: narrowing cannot satisfy `<0.6.0` and
+# `>=0.6.0` at once. The upper bounds have to be overridden, which is what
+# snowflake-emulator did for the same sqlparse advisories.
+#
+# THIS LOCK IS THE ONE THAT MATTERS FOR DBT. The platform runs `steps/gold.py`
+# and `steps/silver.py` through `uv run --directory <this product>`, so dbt
+# executes from here rather than from the platform's lock -- which, since the
+# split, installs no dbt at all. These overrides came with the code that needs
+# them.
+#
+# Deliberate, and checked rather than assumed: `make verify` runs real
+# dbt-snowflake from this lock end to end -- ingest, bronze, silver, gold and
+# 52 contracts -- so a break in what dbt actually uses shows up as a failing
+# pipeline rather than as a passing install.
+#
+# DELETE THESE when dbt-snowflake takes a connector that allows the patched
+# versions, rather than leaving them quietly pinning the ecosystem.
+override-dependencies = [
+    "cryptography>=50.0.0",
+    "pyopenssl>=26.0.0",
+    "sqlparse>=0.6.0",
+    # The connector is what caps the two above; dbt-snowflake pins it back.
+    "snowflake-connector-python>=4.7.2",
+]
+
+package = false
+conflicts = [
+    [
+        { group = "engine" },
+        { group = "dbt" },
+    ],
+]
+
+[tool.uv.sources]
+# PUBLISHED WHEELS, not sibling checkouts. This repository has to clone and
+# build on its own -- DoD item 1 in the family plan, and the defect that made
+# this cell the one consumer a core release could not reach.
+#
+# THE SNOWFLAKE-TARGET TAG MUST EQUAL SNOWFLAKE_EMULATOR_VERSION in the
+# platform's versions.env. Before the split those two lived in one repository
+# and a test held them together; they are now in two, so the PLATFORM checks it
+# -- `scripts/check_product_pin.py`, run by `make verify` against whatever
+# product it was pointed at. A workspace binary and a client that disagree
+# about the contract is the one mismatch a consumer repository exists to notice.
+snowflake-target = { url = "https://github.com/calvinchengx/snowflake-emulator/releases/download/v0.1.5/snowflake_target-0.1.0-py3-none-any.whl" }
+contoso-data-product = { url = "https://github.com/calvinchengx/contoso-data-product/releases/download/v0.3.1/contoso_data_product-0.3.1-py3-none-any.whl" }
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
