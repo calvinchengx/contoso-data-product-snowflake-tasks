@@ -376,10 +376,10 @@ wheels = [
 
 [[package]]
 name = "contoso-data-product"
-version = "0.3.1"
-source = { url = "https://github.com/calvinchengx/contoso-data-product/releases/download/v0.3.1/contoso_data_product-0.3.1-py3-none-any.whl" }
+version = "0.5.0"
+source = { url = "https://github.com/calvinchengx/contoso-data-product/releases/download/v0.5.0/contoso_data_product-0.5.0-py3-none-any.whl" }
 wheels = [
-    { url = "https://github.com/calvinchengx/contoso-data-product/releases/download/v0.3.1/contoso_data_product-0.3.1-py3-none-any.whl", hash = "sha256:a9669ec06348be21c813f60927da94ec31a16f8c8a41e31604deac6182be3a0a" },
+    { url = "https://github.com/calvinchengx/contoso-data-product/releases/download/v0.5.0/contoso_data_product-0.5.0-py3-none-any.whl", hash = "sha256:15d8a1116236a39a1d4bc0aad47d71eadd34ad72465f942c416f5015c8748d8d" },
 ]
 
 [package.metadata]
@@ -414,7 +414,7 @@ engine = [
 [package.metadata]
 requires-dist = [
     { name = "confluent-kafka", specifier = ">=2.5,<3" },
-    { name = "contoso-data-product", url = "https://github.com/calvinchengx/contoso-data-product/releases/download/v0.3.1/contoso_data_product-0.3.1-py3-none-any.whl" },
+    { name = "contoso-data-product", url = "https://github.com/calvinchengx/contoso-data-product/releases/download/v0.5.0/contoso_data_product-0.5.0-py3-none-any.whl" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2,<4" },
     { name = "pyarrow", specifier = ">=18,<24" },
     { name = "requests", specifier = ">=2.32,<3" },
