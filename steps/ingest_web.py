@@ -30,9 +30,10 @@ import json
 
 import requests
 from credentials import resolve
+from target import T
 
 from sources import WEB_API, WEB_KEY_SECRET
-from stage import STAGE
+from stage import WORK, put
 
 
 FEEDS = [
@@ -50,6 +51,7 @@ def fetch(path: str, key: str, page: int | None = None) -> requests.Response:
 
 
 def main() -> int:
+    t = T()
     # This vendor's own key. Using the POS credential would still land bytes --
     # they are separate processes with separate keys -- and prove nothing.
     api_key = resolve(WEB_KEY_SECRET)
@@ -60,7 +62,7 @@ def main() -> int:
 
     landed = {}
     for path, subdir in FEEDS:
-        dest = STAGE / subdir
+        dest = WORK / subdir
         dest.mkdir(parents=True, exist_ok=True)
         for stale in dest.glob("*.csv"):
             stale.unlink()
@@ -100,6 +102,11 @@ def main() -> int:
         assert over.status_code == 404, (
             f"{path} served page {total_pages + 1} of {total_pages}"
         )
+        # UPLOADED, not written into place. The parts above are in this
+        # product's own scratch directory; `PUT` is what puts them in the
+        # stage, through the driver's file transfer agent -- the same path a
+        # real account takes (G46).
+        put(t, subdir, sorted(dest.glob("*.csv")))
         landed[subdir] = docs
         print(f"landed {subdir}/ — {parts} part(s), {docs:,} document(s)")
 

@@ -20,7 +20,7 @@ from datetime import date
 
 from contoso_product import bronze_contract, check_bronze
 from provision import sql
-from stage import STAGE
+from stage import WORK, staged
 from target import T
 
 # The platform's table name for each name the contract uses. The indirection is
@@ -63,10 +63,15 @@ FEEDS = [
 
 
 def _header(subdir: str) -> list[str]:
-    parts = sorted((STAGE / subdir).glob("*.csv"))
+    # INGEST'S OWN OUTPUT, not the stage. `work/` is this product's scratch
+    # space on whatever machine it runs on; reading a file you just wrote is
+    # fine anywhere, and reading the WAREHOUSE'S stage as a filesystem is what
+    # breaks on a real account (G46). The column names and types below come
+    # from here; the BYTES come from the stage, by name.
+    parts = sorted((WORK / subdir).glob("*.csv"))
     if not parts:
         raise SystemExit(
-            f"nothing staged under {STAGE / subdir} — run ingest first."
+            f"nothing under {WORK / subdir} — run ingest first."
         )
     # PARSED AS CSV, not split on commas. The JSON-text feeds are written
     # QUOTE_ALL, so their header arrives as `"doc"` and a naive split keeps the
@@ -89,14 +94,22 @@ def _load(t, table: str, subdir: str, shape: str) -> int:
     # ONE COPY PER PART, because this engine does not read a prefix. Snowflake
     # itself does -- `COPY INTO t FROM @~/dir/` is the ordinary form, and the
     # vendor pages precisely so that a directory of parts is what arrives. The
-    # emulator answers a prefix with `ok` and loads nothing, and a glob with an
-    # error (measured; noted on snowflake-emulator#20). Naming each part is the
-    # form that works, and the loop is what a real prefix would have done.
-    parts = sorted((STAGE / subdir).glob("*.csv"))
+    # emulator refuses the prefix form BY NAME (snowflake-emulator#41; it used
+    # to answer `ok` and load nothing, which is why this loop exists). Naming
+    # each part is the form that works, and the loop is what a prefix would have
+    # done.
+    #
+    # THE NAMES COME FROM `LIST`, not from a glob of the client's filesystem.
+    # That is the half of G46 that is easy to miss: the copies were always
+    # per-file and correct, and the DISCOVERY above them read a directory only
+    # the emulator has. `staged()` asks the warehouse, which is the only
+    # filesystem that exists on both targets -- and it also means this loop
+    # copies what is actually there rather than what ingest believes it wrote.
+    parts = staged(t, subdir)
     for part in parts:
         out = sql(
             t,
-            f"COPY INTO {table} FROM '@~/{subdir}/{part.name}' "
+            f"COPY INTO {table} FROM '@~/{subdir}/{part}' "
             f"FILE_FORMAT = (TYPE = CSV SKIP_HEADER = 1)",
         )
         if not out.get("success"):
@@ -202,7 +215,7 @@ def _widen(kinds: set[str]) -> str:
 
 
 def _csv_rows(subdir: str, limit: int):
-    parts = sorted((STAGE / subdir).glob("*.csv"))
+    parts = sorted((WORK / subdir).glob("*.csv"))
     seen = 0
     for part in parts:
         with part.open(encoding="utf-8", newline="") as fh:
@@ -258,7 +271,7 @@ def _document_types(subdir: str, columns: list[str]) -> dict[str, str]:
 
 
 def _documents(subdir: str, limit: int):
-    parts = sorted((STAGE / subdir).glob("*.csv"))
+    parts = sorted((WORK / subdir).glob("*.csv"))
     seen = 0
     for part in parts:
         with part.open(encoding="utf-8", newline="") as fh:

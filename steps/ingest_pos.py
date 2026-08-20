@@ -24,9 +24,10 @@ import csv
 
 import requests
 from credentials import resolve
+from target import T
 
 from sources import POS_API, POS_KEY_SECRET
-from stage import STAGE
+from stage import WORK, put
 
 
 # (operation path, landed subdirectory, part extension). Named from the OpenAPI
@@ -63,9 +64,10 @@ def main() -> int:
         f"serving generated data, not its fixture"
     )
 
+    t = T()
     landed = {}
     for path, subdir, ext in FEEDS:
-        dest = STAGE / subdir
+        dest = WORK / subdir
         dest.mkdir(parents=True, exist_ok=True)
         for stale in dest.glob("*.csv"):
             stale.unlink()
@@ -106,11 +108,16 @@ def main() -> int:
         assert over.status_code == 404, (
             f"{path} served page {total_pages + 1} of {total_pages}: {over.status_code}"
         )
-        landed[subdir] = {"bytes": written, "parts": parts}
-        print(f"landed {subdir}/ — {parts} part(s), {written:,} bytes")
+        # UPLOADED, not written into place. The parts above are in this
+        # product's own scratch directory; `PUT` is what puts them in the
+        # stage, through the driver's file transfer agent -- the same path a
+        # real account takes (G46).
+        names = put(t, subdir, sorted(dest.glob("*.csv")))
+        landed[subdir] = {"bytes": written, "parts": parts, "staged": names}
+        print(f"landed {subdir}/ — {parts} part(s), {written:,} bytes, {len(names)} staged")
 
     total = sum(v["bytes"] for v in landed.values())
-    print(f"Contoso POS: {len(landed)} feed(s), {total:,} bytes into the stage")
+    print(f"Contoso POS: {len(landed)} feed(s), {total:,} bytes uploaded to the stage")
     return 0
 
 

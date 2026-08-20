@@ -31,8 +31,9 @@ import time
 
 from confluent_kafka import Consumer, KafkaError, KafkaException, TopicPartition
 
+from target import T
 from sources import ERP_DB, ERP_HOST, ERP_PORT, ERP_TOPIC, ERP_USER, REDPANDA
-from stage import STAGE
+from stage import WORK, put
 
 TOPIC = ERP_TOPIC
 
@@ -187,7 +188,7 @@ def main() -> int:
             )
         )
 
-    dest = STAGE / "contoso_erp_changes"
+    dest = WORK / "contoso_erp_changes"
     dest.mkdir(parents=True, exist_ok=True)
     for stale in dest.glob("*.csv"):
         stale.unlink()
@@ -196,6 +197,9 @@ def main() -> int:
         w = csv.DictWriter(fh, fieldnames=fields, quoting=csv.QUOTE_MINIMAL)
         w.writeheader()
         w.writerows(rows)
+
+    # UPLOADED, not written into place -- see steps/stage.py (G46).
+    put(T(), "contoso_erp_changes", sorted(dest.glob("*.csv")))
 
     print(
         f"Contoso ERP: {len(rows):,} change events consumed from Kafka "

@@ -29,9 +29,10 @@ import io
 
 import requests
 from credentials import resolve
+from target import T
 
 from sources import REFERENCE_API, REFERENCE_KEY_SECRET
-from stage import STAGE
+from stage import WORK, put
 
 
 FEEDS = [
@@ -47,6 +48,7 @@ def fetch(path: str, key: str) -> requests.Response:
 
 
 def main() -> int:
+    t = T()
     import pyarrow.csv as pv
     import pyarrow.parquet as pq
 
@@ -82,12 +84,17 @@ def main() -> int:
         )
 
         table = pq.read_table(io.BytesIO(blob))
-        dest = STAGE / subdir
+        dest = WORK / subdir
         dest.mkdir(parents=True, exist_ok=True)
         for stale in dest.glob("*.csv"):
             stale.unlink()
         pv.write_csv(table, dest / "part-0001.csv")
 
+        # UPLOADED, not written into place. The parts above are in this
+        # product's own scratch directory; `PUT` is what puts them in the
+        # stage, through the driver's file transfer agent -- the same path a
+        # real account takes (G46).
+        put(t, subdir, sorted(dest.glob("*.csv")))
         landed[subdir] = table.num_rows
         print(
             f"landed {subdir}/ — {len(blob):,} bytes, sha256 verified, "
