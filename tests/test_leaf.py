@@ -12,7 +12,9 @@ repository out and runs `make verify PRODUCT=...` against it.
 
 from __future__ import annotations
 
+import json
 import pathlib
+import subprocess
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 STEPS = ROOT / "steps"
@@ -63,11 +65,16 @@ def test_no_transform_sql_lives_here():
     gitignored. A committed `.sql` file is the moment "one data product, many
     engines" stops being true, and it would arrive as a convenience.
     """
-    tracked = [
-        p for p in ROOT.rglob("*.sql")
-        if ".venv" not in p.parts and "target" not in p.parts
-    ]
-    assert tracked == [], f"transform SQL has been copied into the leaf: {tracked}"
+    # ASK GIT, not the filesystem. `gold/` and `silver/` are working
+    # directories: the steps materialise core's models into them at run time and
+    # .gitignore covers them, so a tree walk here reports the models this cell
+    # is SUPPOSED to fetch. The promise is that none of it is ever COMMITTED,
+    # and only git can answer that.
+    out = subprocess.run(
+        ["git", "ls-files", "*.sql"], cwd=ROOT, capture_output=True, text=True, check=True
+    )
+    tracked = [line for line in out.stdout.splitlines() if line.strip()]
+    assert tracked == [], f"transform SQL has been committed to the leaf: {tracked}"
 
 
 def test_bronze_is_sql_not_spark():
@@ -165,3 +172,104 @@ def test_both_wheels_come_from_a_tagged_release():
     ):
         marker = f"{repo}/releases/download/v"
         assert marker in proj, f"{name} does not install from a tagged release"
+
+
+def test_both_dbt_steps_run_their_tests():
+    """`dbt run` proves models build. It proves nothing about a guarantee.
+
+    Until this was fixed, `make verify` invoked `dbt run` twice and `dbt test`
+    never, while the snapshot published five contract names taken from a
+    directory listing. The cell reported guarantees nothing had checked.
+    """
+    for step in ("gold.py", "silver.py"):
+        src = (STEPS / step).read_text(encoding="utf-8")
+        assert '"test"' in src and "dbt" in src, f"{step} never invokes dbt test"
+        assert "read_run_results" in src, (
+            f"{step} does not read dbt's own record of what it ran -- a step "
+            f"that trusts its own exit code cannot say WHICH tests ran"
+        )
+
+
+def test_the_snapshot_contract_list_is_not_a_directory_listing():
+    """The exact defect, named so it cannot come back as a convenience.
+
+    `sorted(p.stem for p in (product / "tests").glob("*.sql"))` assigned
+    straight into the snapshot is a list of FILES presented as a list of
+    guarantees. The glob is still used -- as the expectation that
+    `contracts.check` holds dbt's results against -- so the assertion is about
+    where its output goes, not about whether it exists.
+    """
+    src = (STEPS / "gold.py").read_text(encoding="utf-8")
+    body = src[src.index('"contracts"') : src.index('"contracts"') + 200]
+    assert "glob" not in body, (
+        "the snapshot's contract list is a directory listing again -- it must "
+        "come from run_results.json, so that naming a contract means it ran"
+    )
+
+
+def test_run_results_is_read_with_args_which_asserted():
+    """dbt run and dbt test write the SAME filename.
+
+    Reading it without checking `args.which` reports models built as tests
+    passed -- the identical mistake one layer below the one being fixed.
+    """
+    src = (STEPS / "contracts.py").read_text(encoding="utf-8")
+    assert 'args"' in src and '"which"' in src or 'get("which")' in src, (
+        "contracts.py does not assert which invocation wrote run_results.json"
+    )
+
+
+def test_a_contract_that_did_not_run_is_a_failure(tmp_path):
+    """Checked against the failure, not only the happy path.
+
+    The whole point is to notice a contract that was never evaluated. A guard
+    that only ever sees passing input is the thing it is guarding against.
+    """
+    import sys
+
+    sys.path.insert(0, str(STEPS))
+    from contracts import ContractError, check, read_run_results
+
+    ran = {
+        "args": {"which": "test"},
+        "results": [
+            {"unique_id": "test.contoso_gold.money_is_never_stored_as_float", "status": "pass"}
+        ],
+    }
+    assert check(ran, {"money_is_never_stored_as_float"}, "gold") == [
+        "money_is_never_stored_as_float"
+    ]
+
+    # shipped by core, evaluated by nobody
+    try:
+        check(ran, {"money_is_never_stored_as_float", "revenue_summary_loses_no_revenue"}, "gold")
+    except ContractError as exc:
+        assert "revenue_summary_loses_no_revenue" in str(exc)
+    else:
+        raise AssertionError("a contract that never ran was reported as met")
+
+    # evaluated and failed
+    failed = {
+        "args": {"which": "test"},
+        "results": [
+            {"unique_id": "test.contoso_gold.money_is_never_stored_as_float", "status": "fail"}
+        ],
+    }
+    try:
+        check(failed, {"money_is_never_stored_as_float"}, "gold")
+    except ContractError as exc:
+        assert "fail" in str(exc)
+    else:
+        raise AssertionError("a failing contract was reported as met")
+
+    # a `dbt run` masquerading as a `dbt test`
+    (tmp_path / "target").mkdir()
+    (tmp_path / "target" / "run_results.json").write_text(
+        json.dumps({"args": {"which": "run"}, "results": []}), encoding="utf-8"
+    )
+    try:
+        read_run_results(tmp_path)
+    except ContractError as exc:
+        assert "not a `dbt test`" in str(exc)
+    else:
+        raise AssertionError("a dbt run was accepted as a dbt test")
