@@ -418,7 +418,7 @@ requires-dist = [
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2,<4" },
     { name = "pyarrow", specifier = ">=18,<24" },
     { name = "requests", specifier = ">=2.32,<3" },
-    { name = "snowflake-target", url = "https://github.com/calvinchengx/snowflake-emulator/releases/download/v0.1.6/snowflake_target-0.1.0-py3-none-any.whl" },
+    { name = "snowflake-target", url = "https://github.com/calvinchengx/snowflake-emulator/releases/download/v0.1.7/snowflake_target-0.1.0-py3-none-any.whl" },
 ]
 
 [package.metadata.requires-dev]
@@ -1622,9 +1622,9 @@ wheels = [
 [[package]]
 name = "snowflake-target"
 version = "0.1.0"
-source = { url = "https://github.com/calvinchengx/snowflake-emulator/releases/download/v0.1.6/snowflake_target-0.1.0-py3-none-any.whl" }
+source = { url = "https://github.com/calvinchengx/snowflake-emulator/releases/download/v0.1.7/snowflake_target-0.1.0-py3-none-any.whl" }
 wheels = [
-    { url = "https://github.com/calvinchengx/snowflake-emulator/releases/download/v0.1.6/snowflake_target-0.1.0-py3-none-any.whl", hash = "sha256:ffb4642685034a5a6af6c777d497ae08c7848d0cea211a478e5741277c63a880" },
+    { url = "https://github.com/calvinchengx/snowflake-emulator/releases/download/v0.1.7/snowflake_target-0.1.0-py3-none-any.whl", hash = "sha256:bacfd82f816518df6c514100b17aacfe4ffe6844f43785569259efd56ae9f25c" },
 ]
 
 [[package]]

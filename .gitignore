@@ -39,3 +39,7 @@ silver/dbt_project.yml
 # without cloning contoso-data-product. Never edited, never committed: an
 # edit here is a fork of the product that would be silently ignored.
 product/
+
+# Ingest's own scratch space: parts are written here, uploaded by PUT,
+# and read back by bronze for column names and types. Never committed.
+work/

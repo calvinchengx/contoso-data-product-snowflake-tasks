@@ -92,34 +92,44 @@ def test_bronze_is_sql_not_spark():
         assert banned not in src, f"bronze reaches for Spark ({banned})"
 
 
-def test_the_stage_is_resolved_in_one_place():
-    """The coupling the split created, guarded rather than remembered.
+def test_nothing_reads_the_warehouse_stage_as_a_filesystem():
+    """G46: the stage is reached through the DRIVER, never through a path.
 
-    The stage is shared state: ingest writes the vendors' bytes into it and the
-    warehouse -- a container the PLATFORM runs -- reads them back through
-    `COPY INTO`. While the steps and the compose file lived in one repository,
-    both spelled it `<repo>/stages` and agreed by accident. They are now in two,
-    so the platform passes PRODUCT_STAGE and mounts exactly that path.
+    Ingest used to write its parts straight into the stage DIRECTORY -- a host
+    path the platform also mounted into the warehouse -- and bronze globbed the
+    same directory to find them. Both work against this emulator and NEITHER
+    can work against a real Snowflake account, which has no such directory.
 
-    A step that derives the path itself would work in a lone clone and write
-    files the warehouse cannot see under a platform that mounts somewhere else
-    -- surfacing as an EMPTY BRONZE rather than as an error. So the shape is
-    the assertion: `stage.py` resolves it, and every step imports it.
+    The promise was made in two places: both platform READMEs advertise
+    `SNOWFLAKE_TARGET=emulator|real`, and `credentials.py` refuses to read a key
+    from disk on a real target precisely so this code can run against one.
+
+    What is allowed is reading INGEST'S OWN scratch output (`work/`), because
+    reading a file you just wrote is fine anywhere. What is forbidden is
+    treating the warehouse's stage as a directory.
     """
-    assert (STEPS / "stage.py").is_file()
-    offenders = []
     for p in STEPS.glob("*.py"):
+        src = p.read_text(encoding="utf-8")
         if p.name == "stage.py":
             continue
-        src = p.read_text(encoding="utf-8")
-        if "STAGE" not in src:
-            continue
-        if "from stage import STAGE" not in src:
-            offenders.append(p.name)
-    assert offenders == [], (
-        "these steps name a stage without importing the resolved one: "
-        + ", ".join(offenders)
+        assert "STAGE" not in src, (
+            f"{p.name} still names the stage as a path; bytes go in by PUT and "
+            f"come back by LIST"
+        )
+
+
+def test_ingest_uploads_and_bronze_lists():
+    """The two halves of the mechanism, asserted by shape rather than by run."""
+    for mod in ("ingest_pos", "ingest_web", "ingest_reference", "ingest_erp_cdc"):
+        src = (STEPS / f"{mod}.py").read_text(encoding="utf-8")
+        assert "put(" in src, f"{mod} does not upload; it writes into place"
+    bronze = (STEPS / "bronze.py").read_text(encoding="utf-8")
+    assert "staged(t, subdir)" in bronze, (
+        "bronze must ask the warehouse what is staged rather than glob a "
+        "directory only the emulator has"
     )
+    stage = (STEPS / "stage.py").read_text(encoding="utf-8")
+    assert "PUT file://" in stage and "LIST @~/" in stage
 
 
 def test_the_leaf_holds_no_infrastructure():
