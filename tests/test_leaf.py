@@ -92,6 +92,22 @@ def test_bronze_is_sql_not_spark():
         assert banned not in src, f"bronze reaches for Spark ({banned})"
 
 
+def _code_only(path) -> str:
+    """The module's source with its comments removed.
+
+    Comments are where a step EXPLAINS itself, and an assertion about what the
+    code does should not be able to fail on an explanation of why it does it.
+    """
+    import tokenize
+
+    out = []
+    with path.open("rb") as fh:
+        for tok in tokenize.tokenize(fh.readline):
+            if tok.type != tokenize.COMMENT:
+                out.append(tok.string)
+    return "".join(out) if out else path.read_text(encoding="utf-8")
+
+
 def test_nothing_reads_the_warehouse_stage_as_a_filesystem():
     """G46: the stage is reached through the DRIVER, never through a path.
 
@@ -109,10 +125,15 @@ def test_nothing_reads_the_warehouse_stage_as_a_filesystem():
     treating the warehouse's stage as a directory.
     """
     for p in STEPS.glob("*.py"):
-        src = p.read_text(encoding="utf-8")
         if p.name == "stage.py":
             continue
-        assert "STAGE" not in src, (
+        # CODE, NOT PROSE. This read the raw source, so a COMMENT saying the
+        # word tripped it -- and the comments that say it are the ones
+        # explaining why the stage is reached through the driver, which is the
+        # very thing being asserted. The emulator's own rewrite layer learned
+        # this: "rewrites run only over code. A quote inside a `--` comment is
+        # prose."
+        assert "STAGE" not in _code_only(p), (
             f"{p.name} still names the stage as a path; bytes go in by PUT and "
             f"come back by LIST"
         )
@@ -123,11 +144,21 @@ def test_ingest_uploads_and_bronze_lists():
     for mod in ("ingest_pos", "ingest_web", "ingest_reference", "ingest_erp_cdc"):
         src = (STEPS / f"{mod}.py").read_text(encoding="utf-8")
         assert "put(" in src, f"{mod} does not upload; it writes into place"
-    bronze = (STEPS / "bronze.py").read_text(encoding="utf-8")
-    assert "staged(t, subdir)" in bronze, (
-        "bronze must ask the warehouse what is staged rather than glob a "
-        "directory only the emulator has"
+    bronze = _code_only(STEPS / "bronze.py")
+    # THE PROPERTY IS "NO CLIENT GLOB", not "calls staged()". Bronze used to
+    # list the parts and issue one COPY INTO each, because the emulator refused
+    # a prefix; snowflake-emulator#53 resolves one the way Snowflake does, so
+    # bronze names the prefix and the WAREHOUSE resolves it. That is the same
+    # guarantee arrived at more directly -- the client never enumerates the
+    # stage at all -- and pinning the old mechanism would have failed the
+    # better version of the thing being asked for.
+    assert "COPY INTO {table} FROM '@~/{subdir}/'" in bronze, (
+        "bronze must name a stage PREFIX and let the warehouse resolve it"
     )
+    # Globbing `work/` stays allowed and is not asserted against: that is
+    # ingest's own scratch output, and reading a file you just wrote is fine
+    # anywhere. The stage is covered by the test above, which forbids naming it
+    # as a path at all.
     stage = (STEPS / "stage.py").read_text(encoding="utf-8")
     assert "PUT file://" in stage and "LIST @~/" in stage
 

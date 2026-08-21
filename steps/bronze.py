@@ -20,7 +20,8 @@ from datetime import date
 
 from contoso_product import bronze_contract, check_bronze
 from provision import sql
-from stage import WORK, staged
+from stage import WORK
+from tasks import run_graph
 from target import T
 
 # The platform's table name for each name the contract uses. The indirection is
@@ -80,59 +81,44 @@ def _header(subdir: str) -> list[str]:
         return next(csv.reader(fh))
 
 
-def _load(t, table: str, subdir: str, shape: str) -> int:
+def _statements(t, table: str, subdir: str, shape: str) -> list[tuple[str, str]]:
+    """The statements this feed needs, as (node, sql) for the task graph.
+
+    BUILT HERE, RUN BY TASKS. The shape of a feed is discovered from the stage
+    -- the vendor's own header decides the columns -- and that discovery is a
+    read, so it stays here. What it produces is the statements, which run as
+    tasks.
+    """
     cols = _header(subdir)
     assert len(cols) >= 1, f"{subdir}: the header did not parse: {cols[:3]}"
     if shape == "text" and cols != ["doc"]:
         raise SystemExit(f"{subdir}: expected a single `doc` column, got {cols[:3]}")
 
     ddl = ", ".join(f'"{c}" {ty}' for c, ty in _csv_types(subdir, cols, shape).items())
-    out = sql(t, f"CREATE OR REPLACE TABLE {table} ({ddl})")
-    if not out.get("success"):
-        raise SystemExit(out)
 
-    # ONE COPY PER PART, because this engine does not read a prefix. Snowflake
-    # itself does -- `COPY INTO t FROM @~/dir/` is the ordinary form, and the
-    # vendor pages precisely so that a directory of parts is what arrives. The
-    # emulator refuses the prefix form BY NAME (snowflake-emulator#41; it used
-    # to answer `ok` and load nothing, which is why this loop exists). Naming
-    # each part is the form that works, and the loop is what a prefix would have
-    # done.
+    # ONE COPY FOR THE WHOLE FEED, because a stage reference is a PREFIX.
     #
-    # THE NAMES COME FROM `LIST`, not from a glob of the client's filesystem.
-    # That is the half of G46 that is easy to miss: the copies were always
-    # per-file and correct, and the DISCOVERY above them read a directory only
-    # the emulator has. `staged()` asks the warehouse, which is the only
-    # filesystem that exists on both targets -- and it also means this loop
-    # copies what is actually there rather than what ingest believes it wrote.
-    parts = staged(t, subdir)
-    for part in parts:
-        out = sql(
-            t,
-            f"COPY INTO {table} FROM '@~/{subdir}/{part}' "
+    # This was one COPY INTO per part, and the loop was not the product's idea:
+    # the emulator refused a prefix by name, so naming each part was the form
+    # that worked. snowflake-emulator#53 resolves a prefix the way Snowflake
+    # does -- every file whose path starts with the reference, in sorted order
+    # -- so the ordinary form works and the loop is gone.
+    #
+    # It matters more than tidiness here. A task body is ONE statement, so a
+    # per-part loop would have made this feed as many tasks as the vendor
+    # happened to page it into: thirty-odd for eight tables, a graph whose shape
+    # was decided by an emulator limitation rather than by the pipeline.
+    stmts = [
+        (f"{table}_create", f"CREATE OR REPLACE TABLE {table} ({ddl})"),
+        (
+            f"{table}_load",
+            f"COPY INTO {table} FROM '@~/{subdir}/' "
             f"FILE_FORMAT = (TYPE = CSV SKIP_HEADER = 1)",
-        )
-        if not out.get("success"):
-            raise SystemExit(out)
-
-    out = sql(t, f"SELECT count(*) AS n FROM {table}")
-    rows = int((out.get("data") or {}).get("rowset", [["0"]])[0][0])
-
-    # COPY INTO REPORTS `ok` WHETHER OR NOT IT LOADED ANYTHING -- measured, and
-    # filed as snowflake-emulator#20 for the JSON and PARQUET formats, which
-    # load nothing and say ok. So the row count is the only evidence that this
-    # step did what it claims, and an empty bronze fails here rather than
-    # surfacing as a gold star full of truthful-looking zeros.
-    if rows == 0:
-        raise SystemExit(
-            f"COPY INTO reported success and {table} is empty — "
-            f"{len(parts)} part(s) staged under {subdir} and nothing loaded."
-        )
+        ),
+    ]
     if shape == "text":
-        rows = _parse_documents(t, table, subdir)
-        cols = _contract_columns(table, subdir)
-    print(f"  {table:26} {rows:>8,} rows x {len(cols):>3} col(s), {len(parts)} part(s)")
-    return rows
+        stmts += _document_statements(table, subdir)
+    return stmts
 
 
 def _contract_columns(table: str, subdir: str) -> list[str]:
@@ -289,7 +275,7 @@ def _document_keys(subdir: str) -> list[str]:
     return list(next(iter(_documents(subdir, 1))))
 
 
-def _parse_documents(t, table: str, subdir: str) -> int:
+def _document_statements(table: str, subdir: str) -> list[tuple[str, str]]:
     """Turn one JSON document per row into the columns silver reads.
 
     THE VENDOR SHIPS DOCUMENTS AND SILVER READS COLUMNS, and something has to
@@ -303,27 +289,52 @@ def _parse_documents(t, table: str, subdir: str) -> int:
     THE COLUMN LIST IS THE CONTRACT'S, not this file's. bronze_contract() is
     what silver's sources.yml declares, so bronze cannot drift from what silver
     reads without the contract moving first.
+
+    THREE STATEMENTS, SO THREE TASKS. They ran in a loop here and now run as
+    nodes, which changes nothing about the SQL and everything about what happens
+    when the middle one fails: the drop no longer runs against a table the
+    projection never built, and the history says which of the three stopped it.
     """
     columns = _contract_columns(table, subdir)
     types = _document_types(subdir, columns)
     projected = ", ".join(_project(c, types[c]) for c in columns)
-    for stmt in (
-        f"CREATE OR REPLACE TABLE {table}_doc AS SELECT PARSE_JSON(doc) AS v FROM {table}",
-        f"CREATE OR REPLACE TABLE {table} AS SELECT {projected} FROM {table}_doc",
-        f"DROP TABLE {table}_doc",
-    ):
-        out = sql(t, stmt)
-        if not out.get("success"):
-            raise SystemExit(f"{table}: parsing the documents failed: {out}")
-    out = sql(t, f"SELECT count(*) AS n FROM {table}")
-    return int((out.get("data") or {}).get("rowset", [["0"]])[0][0])
-
+    return [
+        (f"{table}_parse", f"CREATE OR REPLACE TABLE {table}_doc AS SELECT PARSE_JSON(doc) AS v FROM {table}"),
+        (f"{table}_project", f"CREATE OR REPLACE TABLE {table} AS SELECT {projected} FROM {table}_doc"),
+        (f"{table}_tidy", f"DROP TABLE {table}_doc"),
+    ]
 
 def main() -> int:
     t = T()
-    total = 0
+
+    # ONE GRAPH FOR THE WHOLE OF BRONZE, rather than one per feed. The feeds are
+    # independent, so a chain says something slightly stronger than they need --
+    # but it says the thing that matters: if one feed cannot be built, the rest
+    # are SKIPPED and named, rather than half a bronze being handed to silver as
+    # though it were whole.
+    plan: list[tuple[str, str]] = []
     for table, subdir, shape in FEEDS:
-        total += _load(t, table, subdir, shape)
+        plan += _statements(t, table, subdir, shape)
+    run_graph(t, "bronze", plan)
+
+    # COUNTED AFTERWARDS, FROM THE ENGINE. The tasks report SUCCEEDED, and
+    # `COPY INTO` reports ok whether or not it loaded anything (measured, and
+    # filed as snowflake-emulator#20 for JSON and PARQUET, which load nothing
+    # and say ok). So the rows are the only evidence that this step did what it
+    # claims, and they are read back rather than accumulated from what the
+    # loader believed it wrote.
+    total = 0
+    for table, _subdir, _shape in FEEDS:
+        out = sql(t, f"SELECT count(*) AS n FROM {table}")
+        if not out.get("success"):
+            raise SystemExit(f"{table}: the graph succeeded and the table cannot be read: {out}")
+        rows = int((out.get("data") or {}).get("rowset", [["0"]])[0][0])
+        if rows == 0:
+            raise SystemExit(
+                f"the bronze graph reported SUCCEEDED and {table} is empty — "
+                f"every task ran and nothing arrived."
+            )
+        total += rows
     # THE CONTRACT, CHECKED FROM THE ENGINE. Bronze is a contract between the
     # platform that writes it and the silver that reads it, and until core
     # 0.3.0 nothing verified it: this cell landed its JSON feeds whole, in a
@@ -340,7 +351,7 @@ def main() -> int:
         raise SystemExit(
             "bronze does not meet the contract silver reads:\n  " + "\n  ".join(problems)
         )
-    print(f"bronze: {total:,} rows across {len(FEEDS)} tables, by COPY INTO — contract met")
+    print(f"bronze: {total:,} rows across {len(FEEDS)} tables, by COPY INTO through Snowflake Tasks — contract met")
     return 0
 
 
