@@ -24,7 +24,7 @@ from contoso_product import silver_dir
 from contracts import check, read_run_results, summarise
 from provision import sql
 from target import SCHEMA_SILVER, T
-from tasks import fetch_dbt_output, run_graph, stage_dbt_project
+from tasks import env_vars_clause, fetch_dbt_output, run_graph, stage_dbt_project
 
 # What bronze called its tables here, against what the models ask for. The
 # indirection is the product's: `source('bronze', var('bronze_pos_orders'))`,
@@ -68,17 +68,13 @@ def main() -> int:
     # a dbt subprocess. dbt runs INSIDE the account now, so the account supplies
     # its own connection -- there is no host for this step to know, and nothing
     # for it to get wrong.
-    stage_dbt_project(
-        t,
-        "silver",
-        work,
-        dbt_vars=BRONZE_NAMES,
-        # Bronze landed in the same schema silver writes to, so the source
-        # lookup and the model output agree without a second schema to
-        # provision. Named rather than defaulted because the models default it
-        # to `bronze`, which is not where this platform's bronze is.
-        env_vars={"DBT_BRONZE_SCHEMA": SCHEMA_SILVER},
-    )
+    stage_dbt_project(t, "silver", work, dbt_vars=BRONZE_NAMES)
+
+    # Bronze landed in the same schema silver writes to, so the source lookup
+    # and the model output agree without a second schema to provision. Named
+    # rather than defaulted because the models default it to `bronze`, which is
+    # not where this platform's bronze is.
+    env = env_vars_clause({"DBT_BRONZE_SCHEMA": SCHEMA_SILVER})
 
     # RUN AND TEST AS TWO NODES, which is Snowflake's own orchestration example
     # and stronger than two subprocesses: `test` runs only if `run` succeeded,
@@ -94,8 +90,8 @@ def main() -> int:
         t,
         "silver",
         [
-            ("run", "EXECUTE DBT PROJECT silver ARGS='run'"),
-            ("test", "EXECUTE DBT PROJECT silver ARGS='test'"),
+            ("run", f"EXECUTE DBT PROJECT silver ARGS='run'{env}"),
+            ("test", f"EXECUTE DBT PROJECT silver ARGS='test'{env}"),
         ],
     )
 

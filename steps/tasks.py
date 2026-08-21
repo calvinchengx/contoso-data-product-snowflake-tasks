@@ -105,7 +105,7 @@ def run_graph(t, name: str, steps: list[tuple[str, str]]) -> None:
     print(f"{name}: {len(names)} task(s) through Snowflake Tasks, all SUCCEEDED")
 
 
-def stage_dbt_project(t, name: str, work: Path, dbt_vars: dict, env_vars: dict) -> None:
+def stage_dbt_project(t, name: str, work: Path, dbt_vars: dict) -> None:
     """Put a dbt project into the stage and register it as an account object.
 
     THE PROJECT BECOMES A SNOWFLAKE OBJECT, which is what `EXECUTE DBT PROJECT`
@@ -121,25 +121,60 @@ def stage_dbt_project(t, name: str, work: Path, dbt_vars: dict, env_vars: dict) 
     is the way that works on both targets; snowflake-emulator#54 records the
     gap rather than hiding it.
 
-    ENV_VARS ARE THE PROJECT'S, and Snowflake requires them UPPERCASE and
-    DBT_-prefixed. That is how `env_var('DBT_BRONZE_SCHEMA')` in the product's
-    sources.yml is answered -- and answering it matters more than it looks: its
-    default is `bronze`, which is not where this platform's bronze lives, so a
-    value that never arrives builds silver against the wrong source without
-    anything failing.
+    ENV_VARS GO ON EXECUTE, not here -- see `env_vars_clause`. Snowflake keeps
+    a project's environment in its env.yml and lets a run override it; there is
+    no ENV_VARS on CREATE, and the emulator refuses one by name.
     """
     project_yml = work / "dbt_project.yml"
-    body = project_yml.read_text(encoding="utf-8")
-    if "\nvars:" in body:
-        raise SystemExit(
-            f"{name}: the product's dbt_project.yml already declares vars, and merging "
-            f"this platform's into it would silently override the product's own."
-        )
-    project_yml.write_text(
-        body.rstrip("\n") + "\n\nvars:\n"
-        + "".join(f"  {k}: {v}\n" for k, v in sorted(dbt_vars.items())),
-        encoding="utf-8",
-    )
+    lines = project_yml.read_text(encoding="utf-8").split("\n")
+    if dbt_vars:
+        # MERGED INTO THE PRODUCT'S OWN vars, not appended as a second block.
+        #
+        # silver's dbt_project.yml already declares `country_variants`, which
+        # core refuses to let drift from `contoso_product.COUNTRY`. A second
+        # `vars:` key would be the last one to win in YAML and would silently
+        # delete it -- so this adds keys INSIDE the existing block, and refuses
+        # only on a real collision, where a platform would genuinely be
+        # overriding a decision the product made.
+        at = next((i for i, line in enumerate(lines) if line.rstrip() == "vars:"), None)
+        if at is None:
+            lines += ["", "vars:"]
+            at = len(lines) - 1
+        # OVERRIDING A DEFAULT IS THE MECHANISM, not a mistake. The product
+        # ships a default name for each bronze table and a platform says what it
+        # actually called them -- which is exactly what `--vars` did before,
+        # where a CLI var beats a project one. So a colliding SCALAR is
+        # replaced.
+        #
+        # A colliding key whose value is a NESTED block is refused instead:
+        # `country_variants` is a map that core refuses to let drift from
+        # `contoso_product.COUNTRY`, and replacing its first line would leave
+        # its children orphaned under a scalar -- a silent corruption of the one
+        # thing the product guards hardest.
+        end = len(lines)
+        for i, line in enumerate(lines[at + 1 :], at + 1):
+            if line and not line.startswith(" "):
+                end = i
+                break
+        remaining = dict(dbt_vars)
+        out = []
+        for i, line in enumerate(lines[at + 1 : end], at + 1):
+            key = line.strip().split(":", 1)[0] if line.startswith("  ") and ":" in line else None
+            top = key if (key and not line.startswith("   ")) else None
+            if top and top in remaining:
+                nested = i + 1 < end and lines[i + 1].startswith("    ")
+                if nested:
+                    raise SystemExit(
+                        f"{name}: the product sets {top} as a nested block in "
+                        f"dbt_project.yml; this platform cannot override it without "
+                        f"orphaning what is under it."
+                    )
+                out.append(f"  {top}: {remaining.pop(top)}")
+                continue
+            out.append(line)
+        out += [f"  {k}: {v}" for k, v in sorted(remaining.items())]
+        lines[at + 1 : end] = out
+    project_yml.write_text("\n".join(lines), encoding="utf-8")
 
     # THROUGH THE DRIVER'S PUT, which is the only route into a stage that exists
     # on both targets. Writing into the stage directory would be reaching into a
@@ -154,10 +189,8 @@ def stage_dbt_project(t, name: str, work: Path, dbt_vars: dict, env_vars: dict) 
         put(t, sub, [path], auto_compress=False)
 
     _ok(sql(t, f"DROP DBT PROJECT IF EXISTS {name}"), f"drop dbt project {name}")
-    pairs = ", ".join(f"{k} = '{v}'" for k, v in sorted(env_vars.items()))
-    clause = f" ENV_VARS = ({pairs})" if pairs else ""
     _ok(
-        sql(t, f"CREATE DBT PROJECT {name} FROM '@~/{name}_project'{clause}"),
+        sql(t, f"CREATE DBT PROJECT {name} FROM '@~/{name}_project'"),
         f"create dbt project {name}",
     )
     print(f"{name}: {len(files)} project file(s) staged, registered as a DBT PROJECT")
@@ -202,3 +235,28 @@ def fetch_dbt_output(t, name: str, work: Path) -> Path:
             f"the client and the server disagree about where the stage is."
         )
     return work
+
+
+def env_vars_clause(env: dict) -> str:
+    """The ENV_VARS a run overrides its project's environment with.
+
+    ON EXECUTE, because that is where Snowflake puts it. UPPERCASE and
+    DBT_-prefixed, because that is what it enforces -- "every key ... must be
+    prefixed with DBT_ ... every key must be UPPERCASE", checked on every run.
+    That constraint is why core's gold reads `DBT_SILVER_DATABASE` at all: the
+    name it used before could not be supplied here by any route, so gold could
+    run on every engine in this family except this one.
+
+    Answering these matters more than it looks. `env_var('DBT_BRONZE_SCHEMA')`
+    defaults to `bronze`, which is not where this platform's bronze lives, so a
+    value that never arrives builds silver against the wrong source with
+    nothing failing.
+    """
+    bad = sorted(k for k in env if k != k.upper() or not k.startswith("DBT_"))
+    if bad:
+        raise SystemExit(
+            f"ENV_VARS keys must be UPPERCASE and DBT_-prefixed; Snowflake refuses "
+            f"the rest and dbt would never see them: {bad}"
+        )
+    pairs = ", ".join(f"{k} = '{v}'" for k, v in sorted(env.items()))
+    return f" ENV_VARS = ({pairs})" if pairs else ""

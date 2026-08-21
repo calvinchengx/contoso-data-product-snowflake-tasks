@@ -10,7 +10,7 @@ from urllib.request import Request, urlopen
 from contoso_product import gold_dir
 from contracts import check, read_run_results, summarise
 from target import DATABASE, SCHEMA_SILVER, T, WAREHOUSE
-from tasks import fetch_dbt_output, run_graph, stage_dbt_project
+from tasks import env_vars_clause, fetch_dbt_output, run_graph, stage_dbt_project
 
 
 def main() -> int:
@@ -37,24 +37,16 @@ def main() -> int:
     # whose eager evaluation made a Fabric-only variable mandatory on every
     # engine and stood in the plan for months as a "dialect gap" while gold had
     # in fact never run here.
-    stage_dbt_project(
-        t,
-        "gold",
-        work,
-        dbt_vars={},
-        env_vars={"DBT_SILVER_DATABASE": DATABASE, "DBT_SILVER_SCHEMA": SCHEMA_SILVER},
-    )
-
-    env_clause = (
-        f"ENV_VARS = (DBT_SILVER_DATABASE = '{DATABASE}', "
-        f"DBT_SILVER_SCHEMA = '{SCHEMA_SILVER}')"
+    stage_dbt_project(t, "gold", work, dbt_vars={})
+    env_clause = env_vars_clause(
+        {"DBT_SILVER_DATABASE": DATABASE, "DBT_SILVER_SCHEMA": SCHEMA_SILVER}
     )
     run_graph(
         t,
         "gold",
         [
-            ("run", f"EXECUTE DBT PROJECT gold ARGS='run' {env_clause}"),
-            ("test", f"EXECUTE DBT PROJECT gold ARGS='test' {env_clause}"),
+            ("run", f"EXECUTE DBT PROJECT gold ARGS='run'{env_clause}"),
+            ("test", f"EXECUTE DBT PROJECT gold ARGS='test'{env_clause}"),
         ],
     )
     # THE DIALECT GAP IS GONE, not silenced. gold.py carried a `dialect_gap`
