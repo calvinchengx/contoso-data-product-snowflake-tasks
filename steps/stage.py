@@ -64,7 +64,7 @@ def connect(t):
     )
 
 
-def put(t, subdir: str, parts: list[pathlib.Path]) -> list[str]:
+def put(t, subdir: str, parts: list[pathlib.Path], auto_compress: bool = True) -> list[str]:
     """Upload each part to `@~/<subdir>/`, returning what the stage now holds.
 
     ONE `PUT` PER FILE rather than a wildcard. Snowflake accepts
@@ -78,7 +78,11 @@ def put(t, subdir: str, parts: list[pathlib.Path]) -> list[str]:
     try:
         cur = con.cursor()
         for part in parts:
-            cur.execute(f"PUT file://{part.resolve()} @~/{subdir}/")
+            # AUTO_COMPRESS defaults TRUE on a real account, which is right for
+            # a CSV feed -- COPY INTO reads the .gz -- and wrong for a dbt
+            # project, where dbt has to read the .sql and .yml themselves.
+            opts = "" if auto_compress else " AUTO_COMPRESS = FALSE"
+            cur.execute(f"PUT file://{part.resolve()} @~/{subdir}/{opts}")
             row = cur.fetchone()
             # The driver reports its own verdict per file. `UPLOADED` is the
             # only one that means the bytes arrived; anything else here would

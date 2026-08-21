@@ -17,15 +17,14 @@ platform repository is how one product quietly becomes two.
 from __future__ import annotations
 
 import json
-import os
 import shutil
-import subprocess
 from pathlib import Path
 
 from contoso_product import silver_dir
-from contracts import ContractError, check, read_run_results, summarise
+from contracts import check, read_run_results, summarise
 from provision import sql
-from target import DATABASE, SCHEMA_SILVER, T, WAREHOUSE
+from target import SCHEMA_SILVER, T
+from tasks import env_vars_clause, fetch_dbt_output, run_graph, stage_dbt_project
 
 # What bronze called its tables here, against what the models ask for. The
 # indirection is the product's: `source('bronze', var('bronze_pos_orders'))`,
@@ -64,75 +63,51 @@ def main() -> int:
         shutil.copytree(product / name, dest)
     shutil.copy(product / "dbt_project.yml", work / "dbt_project.yml")
 
-    host = t.host.replace("https://", "").replace("http://", "")
-    if ":" in host:
-        hostname, port_s = host.rsplit(":", 1)
-        port = int(port_s)
-    else:
-        hostname, port = host, 443
+    # NO CONNECTION SETTINGS HERE ANY MORE. This step used to build a profile
+    # out of the target's host, port, account, user and password and hand it to
+    # a dbt subprocess. dbt runs INSIDE the account now, so the account supplies
+    # its own connection -- there is no host for this step to know, and nothing
+    # for it to get wrong.
+    stage_dbt_project(t, "silver", work, dbt_vars=BRONZE_NAMES)
 
-    env = os.environ.copy()
-    env.update(
-        {
-            "SNOWFLAKE_ACCOUNT": t.account or "test",
-            "SNOWFLAKE_USER": "admin",
-            "SNOWFLAKE_PASSWORD": t.password,
-            "SNOWFLAKE_WAREHOUSE": WAREHOUSE,
-            "SNOWFLAKE_DATABASE": DATABASE,
-            "SNOWFLAKE_SCHEMA": SCHEMA_SILVER,
-            # Bronze landed in the same schema silver writes to, so the source
-            # lookup and the model output agree without a second schema to
-            # provision. Named rather than defaulted because the models default
-            # it to `bronze`, which is not where this platform's bronze is.
-            "DBT_BRONZE_SCHEMA": SCHEMA_SILVER,
-            "DBT_PROFILES_DIR": str(work.resolve()),
-            "DBT_SEND_ANONYMOUS_USAGE_STATS": "false",
-            "SNOWFLAKE_HOST": hostname,
-            "SNOWFLAKE_PORT": str(port),
-        }
-    )
+    # Bronze landed in the same schema silver writes to, so the source lookup
+    # and the model output agree without a second schema to provision. Named
+    # rather than defaulted because the models default it to `bronze`, which is
+    # not where this platform's bronze is.
+    env = env_vars_clause({"DBT_BRONZE_SCHEMA": SCHEMA_SILVER})
 
-    subprocess.check_call(
-        [
-            "dbt",
-            "run",
-            "--project-dir",
-            str(work),
-            "--profiles-dir",
-            str(work),
-            "--vars",
-            json.dumps(BRONZE_NAMES),
-        ],
-        env=env,
-    )
-
+    # RUN AND TEST AS TWO NODES, which is Snowflake's own orchestration example
+    # and stronger than two subprocesses: `test` runs only if `run` succeeded,
+    # and if `run` fails the history says so rather than the contracts being
+    # evaluated against models that were never built.
+    #
     # SILVER SHIPS ONE SINGULAR TEST and it is the one that matters most here:
     # `silver_orders_never_holds_a_non_positive_quantity` checks that the
     # quarantine split does not leak a row. It is also exactly the shape of test
     # that G29 found rendered by no task in another cell -- a singular test
     # belongs to no model, so anything that iterates models runs it never.
-    #
-    # This step ran no tests at all until now, so the check below is not a
-    # tightening: it is the first time silver's guarantees have been evaluated
-    # by the pipeline that publishes them.
-    test_rc = subprocess.call(
+    run_graph(
+        t,
+        "silver",
         [
-            "dbt",
-            "test",
-            "--project-dir",
-            str(work),
-            "--profiles-dir",
-            str(work),
-            "--vars",
-            json.dumps(BRONZE_NAMES),
+            ("run", f"EXECUTE DBT PROJECT silver ARGS='run'{env}"),
+            ("test", f"EXECUTE DBT PROJECT silver ARGS='test'{env}"),
         ],
-        env=env,
     )
+
+    # WHICH TESTS RAN, from dbt's own record. The graph already carries the
+    # verdict -- a failing `dbt test` failed its task and stopped the chain --
+    # but not the NAMES, and a step that reports guarantees it cannot show were
+    # evaluated is the thing G29 and G41 are about.
+    #
+    # Fetched from the STAGE, because dbt no longer runs on this host.
+    # `read_run_results` asserts `args.which == "test"` on it exactly as before:
+    # `run` and `test` write the same filename, and the archive holds whichever
+    # ran last.
+    fetch_dbt_output(t, "silver", work)
     results = read_run_results(work)
     tested = summarise(results)
     check(results, {p.stem for p in (product / "tests").glob("*.sql")}, "silver")
-    if test_rc != 0:
-        raise ContractError(f"silver: dbt test exited {test_rc} -- {tested}")
     print(f"silver contracts: {tested}")
 
     # COUNTED AFTERWARDS, from the engine rather than from dbt's exit code.

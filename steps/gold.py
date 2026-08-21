@@ -3,15 +3,14 @@
 from __future__ import annotations
 
 import json
-import os
 import shutil
-import subprocess
 from pathlib import Path
 from urllib.request import Request, urlopen
 
 from contoso_product import gold_dir
-from contracts import ContractError, check, read_run_results, summarise
-from target import DATABASE, SCHEMA_GOLD, T, WAREHOUSE
+from contracts import check, read_run_results, summarise
+from target import DATABASE, SCHEMA_SILVER, T, WAREHOUSE
+from tasks import env_vars_clause, fetch_dbt_output, run_graph, stage_dbt_project
 
 
 def main() -> int:
@@ -24,79 +23,63 @@ def main() -> int:
             shutil.rmtree(dest)
         shutil.copytree(product / name, dest)
 
-    host = t.host.replace("https://", "").replace("http://", "")
-    if ":" in host:
-        hostname, port_s = host.rsplit(":", 1)
-        port = int(port_s)
-    else:
-        hostname, port = host, 443
-    env = os.environ.copy()
-    env.update(
-        {
-            "SNOWFLAKE_ACCOUNT": t.account or "test",
-            "SNOWFLAKE_USER": "admin",
-            "SNOWFLAKE_PASSWORD": t.password,
-            "SNOWFLAKE_WAREHOUSE": WAREHOUSE,
-            "SNOWFLAKE_DATABASE": DATABASE,
-            "SNOWFLAKE_SCHEMA": SCHEMA_GOLD,
-            "CONTOSO_SILVER_DATABASE": DATABASE,
-            "CONTOSO_SILVER_SCHEMA": "PUBLIC",
-            # LAKEHOUSE_ID IS A FABRIC NAME AND THIS IS NOT FABRIC, but core's
-            # gold sources.yml spells the silver database
-            # `env_var('CONTOSO_SILVER_DATABASE', env_var('LAKEHOUSE_ID'))`,
-            # and Jinja evaluates the DEFAULT EAGERLY -- so the fallback is
-            # read whether or not the first name is set, and a Fabric-only
-            # variable becomes mandatory on every engine.
-            #
-            # Without it dbt does not reach the engine at all: it fails while
-            # PARSING with `Env var required but not provided: 'LAKEHOUSE_ID'`,
-            # and gold.py recorded that as a `dialect_gap` -- a plausible wrong
-            # reason that stood in this plan for months while gold had in fact
-            # never run here. databricks-platform-jobs sets it for the same
-            # reason. The real fix belongs in core: stop nesting env_var as a
-            # default.
-            "LAKEHOUSE_ID": DATABASE,
-            "DBT_PROFILES_DIR": str(work.resolve()),
-            "DBT_SEND_ANONYMOUS_USAGE_STATS": "false",
-            "SNOWFLAKE_HOST": hostname,
-            "SNOWFLAKE_PORT": str(port),
-        }
+    # NO CONNECTION SETTINGS, AND NO SUBPROCESS. dbt runs inside the account
+    # now: the project is staged, named by CREATE DBT PROJECT, and every
+    # invocation after that is a statement.
+    #
+    # DBT_-PREFIXED, and that is not this platform's preference. dbt Projects on
+    # Snowflake namespaces what a project may read -- "Every key in env: and in
+    # any override must be prefixed with DBT_ ... Every key must be UPPERCASE",
+    # enforced on every run -- so `CONTOSO_SILVER_DATABASE` could not be
+    # supplied here by any route. That is what moved the names in core
+    # (contoso-data-product#34, v0.6.0), and it also retired the nested
+    # `env_var('CONTOSO_SILVER_DATABASE', env_var('LAKEHOUSE_ID'))` default,
+    # whose eager evaluation made a Fabric-only variable mandatory on every
+    # engine and stood in the plan for months as a "dialect gap" while gold had
+    # in fact never run here.
+    stage_dbt_project(t, "gold", work, dbt_vars={})
+    env_clause = env_vars_clause(
+        {"DBT_SILVER_DATABASE": DATABASE, "DBT_SILVER_SCHEMA": SCHEMA_SILVER}
     )
-    dialect_gap = None
-    try:
-        subprocess.check_call(
-            ["dbt", "run", "--project-dir", str(work), "--profiles-dir", str(work)],
-            env=env,
-        )
-    except subprocess.CalledProcessError as exc:
-        dialect_gap = f"dbt-snowflake gold failed on this engine: {exc}"
+    run_graph(
+        t,
+        "gold",
+        [
+            ("run", f"EXECUTE DBT PROJECT gold ARGS='run'{env_clause}"),
+            ("test", f"EXECUTE DBT PROJECT gold ARGS='test'{env_clause}"),
+        ],
+    )
+    # THE DIALECT GAP IS GONE, not silenced. gold.py carried a `dialect_gap`
+    # branch that caught a dbt failure and published the snapshot anyway with
+    # the reason attached. The reason it actually caught was the missing
+    # LAKEHOUSE_ID above -- a parse failure recorded for months as an engine
+    # incompatibility. There is nothing left for it to catch that the task graph
+    # does not fail on and name, so it is removed rather than kept as a place
+    # for the next wrong explanation to live.
 
-    # THE CONTRACTS, ACTUALLY EVALUATED. `dbt test` is a SEPARATE invocation
-    # from `dbt run` because their exit codes mean different things: models that
-    # would not build and guarantees that do not hold are different failures,
-    # and one command reports them as one. `call` rather than `check_call` for
-    # the same reason the family's other cells use it -- a failing test must
-    # exit non-zero while still having WRITTEN the artefact that says which
-    # test failed, and check_call would throw before that artefact is read.
-    contracts: list[str] = []
-    tested = None
-    if not dialect_gap:
-        test_rc = subprocess.call(
-            ["dbt", "test", "--project-dir", str(work), "--profiles-dir", str(work)],
-            env=env,
-        )
-        results = read_run_results(work)
-        tested = summarise(results)
-        # The glob is the EXPECTATION now, not the answer: these are the
-        # contracts core ships, and `check` refuses unless dbt evaluated and
-        # passed every one of them.
-        contracts = check(
-            results,
-            {p.stem for p in (product / "tests").glob("*.sql")},
-            "gold",
-        )
-        if test_rc != 0:
-            raise ContractError(f"gold: dbt test exited {test_rc} -- {tested}")
+    # THE CONTRACTS, ACTUALLY EVALUATED, read from dbt's own record.
+    #
+    # `dbt test` ran as its own task, so it has its own verdict: the graph
+    # stopped if it failed. What the graph cannot say is WHICH contracts were
+    # evaluated, and that is the difference between publishing guarantees and
+    # publishing guarantees something checked -- the distinction G29 and G41
+    # exist for.
+    #
+    # run_results.json says it, and it comes back from the STAGE rather than
+    # from a local target/ directory, because dbt no longer runs on this host.
+    # `read_run_results` asserts `args.which == "test"` on it exactly as before,
+    # which still matters: `dbt run` and `dbt test` write the same filename, and
+    # the archive holds whichever ran last.
+    fetch_dbt_output(t, "gold", work)
+    results = read_run_results(work)
+    tested = summarise(results)
+    # The glob is the EXPECTATION now, not the answer: these are the contracts
+    # core ships, and `check` refuses unless dbt evaluated and passed every one.
+    contracts = check(
+        results,
+        {p.stem for p in (product / "tests").glob("*.sql")},
+        "gold",
+    )
 
     snapshot = {
         "revenue_usd": "0",
@@ -107,28 +90,25 @@ def main() -> int:
         "catalog": DATABASE,
         "engine": "duckdb",
     }
-    if dialect_gap:
-        snapshot["dialect_gap"] = dialect_gap
-    else:
-        body = json.dumps(
-            {
-                "statement": "SELECT coalesce(sum(revenue_usd),0), coalesce(sum(cancelled_revenue_usd),0), coalesce(sum(sale_lines),0) FROM fct_revenue_summary",
-                "warehouse": WAREHOUSE,
-            }
-        ).encode()
-        req = Request(
-            f"{t.host}/api/v2/statements",
-            data=body,
-            headers={"Authorization": f"Bearer {t.password}", "Content-Type": "application/json"},
-            method="POST",
-        )
-        with urlopen(req) as resp:
-            out = json.loads(resp.read())
-        rows = (out.get("data") or {}).get("rowset") or []
-        if rows:
-            snapshot["revenue_usd"] = str(rows[0][0])
-            snapshot["cancelled_revenue_usd"] = str(rows[0][1])
-            snapshot["sale_lines"] = str(rows[0][2])
+    body = json.dumps(
+        {
+            "statement": "SELECT coalesce(sum(revenue_usd),0), coalesce(sum(cancelled_revenue_usd),0), coalesce(sum(sale_lines),0) FROM fct_revenue_summary",
+            "warehouse": WAREHOUSE,
+        }
+    ).encode()
+    req = Request(
+        f"{t.host}/api/v2/statements",
+        data=body,
+        headers={"Authorization": f"Bearer {t.password}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    with urlopen(req) as resp:
+        out = json.loads(resp.read())
+    rows = (out.get("data") or {}).get("rowset") or []
+    if rows:
+        snapshot["revenue_usd"] = str(rows[0][0])
+        snapshot["cancelled_revenue_usd"] = str(rows[0][1])
+        snapshot["sale_lines"] = str(rows[0][2])
     if tested:
         snapshot["data_tests"] = tested
     Path("product_snapshot.json").write_text(json.dumps(snapshot, indent=2) + "\n", encoding="utf-8")
