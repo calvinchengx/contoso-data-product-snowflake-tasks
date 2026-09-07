@@ -15,6 +15,18 @@ on:
     branches: [main]
   pull_request:
 
+  # PROOF HAS TO REFRESH ITSELF. ci.yml ran on push and pull_request only, so
+  # with no commits its last green just aged, to 2026-08-24 -- while CodeQL
+  # and Product bump, which do carry a `schedule`, both ran 2026-09-07. The
+  # repo already demonstrates the fix on itself.
+  # A fortnight-old green is not evidence that the build still works against
+  # the ecosystem it pulls from, and the hub flags anything past 14 days.
+  # Weekly at 04:51, clear of the 05:00 daily Product bump. Two jobs, no
+  # secrets, so the cost is negligible against knowing.
+  schedule:
+    - cron: '51 4 * * 1'
+  workflow_dispatch:
+
 permissions:
   contents: read
 
